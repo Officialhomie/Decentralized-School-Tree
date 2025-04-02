@@ -238,6 +238,12 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
     event ContractUnpaused(address unpauser);
 
     /**
+    * @dev Emitted when school management address is updated
+    * @param schoolManagement New school management address
+    */
+    event SchoolManagementUpdated(address schoolManagement);
+
+    /**
      * @dev Constructor disables initializers for implementation contract
      */
     constructor() {
@@ -361,6 +367,23 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
         payable(msg.sender).transfer(amount);
         emit RevenueWithdrawn(msg.sender, amount, block.timestamp);
+    }
+
+    /**
+    * @dev Updates the school management contract address
+    * @param _schoolManagement New address for school management contract
+    * Requirements:
+    * - Must be called by master admin
+    * - New address must not be zero
+    */
+    function updateSchoolManagementAddress(address _schoolManagement) 
+        external 
+        onlyRole(MASTER_ADMIN_ROLE) 
+    {
+        if(_schoolManagement == address(0)) revert InvalidSchoolManagement();
+        schoolManagement = ISchoolManagement(_schoolManagement);
+        
+        emit SchoolManagementUpdated(_schoolManagement);
     }
 
     /**

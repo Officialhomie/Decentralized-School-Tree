@@ -453,14 +453,7 @@ contract SchoolManagementFactoryTest is Test {
         });
 
         // Try to create a school as unauthorized person
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector,
-                unauthorized,
-                factory.MASTER_ADMIN_ROLE()
-            )
-        );
-
+        vm.expectRevert("Only master admin");
         factory.deploySchool{value: SUBSCRIPTION_FEE}(
             organizationAdmin,
             config

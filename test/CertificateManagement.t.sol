@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../src/CertificateManagement.sol";
+import "../src/SchoolManagementBase.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 // A mock RoleRegistry for testing
@@ -69,7 +70,7 @@ contract MockAttendanceTracking {
     }
 }
 
-contract MockStudentProfile {
+contract MockStudentProfile is IStudentProfile {
     mapping(address => mapping(address => bool)) public enrollments;
     mapping(address => uint256) public programs;
     
@@ -88,18 +89,49 @@ contract MockStudentProfile {
     function getStudentProgram(address student) external view returns (uint256) {
         return programs[student];
     }
+    
+    function activateSchool(address school) external {
+        // Just a stub for the interface
+    }
+    
+    function updateReputation(
+        address student,
+        uint256 attendancePoints,
+        uint256 behaviorPoints,
+        uint256 academicPoints
+    ) external {
+        // Just a stub for the interface
+    }
 }
 
-contract MockRevenueSystem {
+contract MockRevenueSystem is IRevenueSystem {
     uint256 public certificateFee = 0.05 ether;
     
     function issueCertificate(address studentAddress, uint256 batchId) external payable {
         require(msg.value >= certificateFee, "Insufficient fee");
         // Certificate issuance logic would be here
     }
+    
+    function processTuitionPayment(address student, uint256 amount) external payable {
+        // Just a stub for the interface
+    }
+    
+    function programCreationFee() external view returns (uint256) {
+        return 0.1 ether;
+    }
+    
+    function setCustomFeeStructure(
+        address school,
+        uint256 programFee,
+        uint256 subscriptionFee,
+        uint256 certFee,
+        uint256 revenueShare
+    ) external {
+        // Just a stub for the interface
+    }
 }
 
-contract MockTuitionSystem {
+contract MockTuitionSystem is ITuitionSystem {
     mapping(bytes32 => bool) public tuitionPaid;
     
     function setTuitionStatus(address school, address student, uint256 term, bool paid) external {
@@ -114,6 +146,10 @@ contract MockTuitionSystem {
     ) external view returns (bool isPaid, uint256 dueDate) {
         bytes32 key = keccak256(abi.encodePacked(school, student, term));
         return (tuitionPaid[key], block.timestamp + 30 days);
+    }
+    
+    function recordTuitionPayment(address student, uint256 term) external {
+        // Just a stub for the interface
     }
 }
 

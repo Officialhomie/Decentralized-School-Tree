@@ -17,8 +17,15 @@ contract MockRoleRegistry is IRoleRegistry {
     event SchoolRoleGranted(bytes32 indexed role, address indexed account, address indexed school);
     event SchoolRoleRevoked(bytes32 indexed role, address indexed account, address indexed school);
     
+    function initialize(address masterAdmin) external {
+        bytes32 masterAdminRole = keccak256("MASTER_ADMIN_ROLE");
+        bytes32 defaultAdminRole = 0x00;
+        _globalRoles[masterAdminRole][masterAdmin] = true;
+        _globalRoles[defaultAdminRole][masterAdmin] = true;
+    }
+    
     function checkRole(bytes32 role, address account, address school) external view returns (bool) {
-        return _roles[role][account][school];
+        return _roles[role][account][school] || _globalRoles[role][account];
     }
     
     function grantSchoolRole(bytes32 role, address account, address school) external {
@@ -33,5 +40,9 @@ contract MockRoleRegistry is IRoleRegistry {
     
     function hasRole(bytes32 role, address account) external view returns (bool) {
         return _globalRoles[role][account];
+    }
+    
+    function grantGlobalRole(bytes32 role, address account) external {
+        _globalRoles[role][account] = true;
     }
 } 

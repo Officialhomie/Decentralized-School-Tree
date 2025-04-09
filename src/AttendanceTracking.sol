@@ -190,7 +190,7 @@ contract AttendanceTracking is SchoolManagementBase, IAttendanceTracking {
             , 
             bool isRegistered, 
             uint32 currentTerm, 
-            uint32 attendanceCount, 
+            , 
             uint64 lastAttendanceDate,
             bool hasFirstAttendance,
             ,

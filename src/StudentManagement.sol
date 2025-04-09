@@ -2,8 +2,40 @@
 pragma solidity ^0.8.20;
 
 import "./SchoolManagementBase.sol";
-import "interfaces/IProgramManagement.sol";
-import "interfaces/IStudentManagement.sol";
+
+/**
+ * @title IProgramManagement
+ * @dev Interface for program management functionality used by student management
+ */
+interface IProgramManagement {
+    function incrementEnrollment(uint256 programId) external returns (bool);
+    function isProgramActive(uint256 programId) external view returns (bool);
+    function getProgramDetails(uint256 programId) external view returns (string memory name, uint256 termFee);
+}
+
+/**
+ * @title IStudentManagement
+ * @dev Interface for student management functionality
+ */
+interface IStudentManagement {
+    function registerStudent(address student, string memory name, uint256 programId) external;
+    function removeStudent(address student) external;
+    function advanceStudentTerm(address student) external;
+    function updateStudentAttendance(address student, bool increase) external;
+    function updateStudentAttendanceDate(address student, uint64 timestamp) external;
+    function setFirstAttendance(address student) external;
+    function getStudentDetails(address student) external view returns (
+        string memory name,
+        bool isRegistered,
+        uint32 currentTerm,
+        uint32 attendanceCount,
+        uint64 lastAttendanceDate,
+        bool hasFirstAttendance,
+        uint32 programId,
+        uint128 totalPayments
+    );
+    function getStudentProgram(address student) external view returns (uint256);
+}
 
 /**
  * @title StudentManagement
@@ -11,16 +43,13 @@ import "interfaces/IStudentManagement.sol";
  */
 contract StudentManagement is SchoolManagementBase, IStudentManagement {
     // Custom errors
-    error InvalidAddress();
     error StudentAlreadyRegistered();
     error StudentNotRegistered();
     error ProgramInactive();
     error ArrayLengthMismatch();
     error BatchSizeTooLarge();
     error RateLimitExceeded();
-    error OperationTooFrequent();
     error TuitionAlreadyPaid();
-    error InsufficientPayment();
     error InvalidString();
 
     /**
@@ -129,7 +158,10 @@ contract StudentManagement is SchoolManagementBase, IStudentManagement {
         });
         
         studentPrograms[student] = programId;
-        _grantRole(STUDENT_ROLE, student);
+        
+        // Grant student role through role registry
+        roleRegistry.grantSchoolRole(STUDENT_ROLE, student, address(this));
+        
         emit StudentRegistered(student, name, 1);
         emit StudentProgramUpdated(student, programId);
     }
@@ -172,7 +204,10 @@ contract StudentManagement is SchoolManagementBase, IStudentManagement {
     function removeStudent(address student) external override onlyRole(ADMIN_ROLE) notRecovered {
         if (!students[student].isRegistered) revert StudentNotRegistered();
         delete students[student];
-        _revokeRole(STUDENT_ROLE, student);
+        
+        // Revoke student role through role registry
+        roleRegistry.revokeSchoolRole(STUDENT_ROLE, student, address(this));
+        
         emit StudentRemoved(student);
     }
     

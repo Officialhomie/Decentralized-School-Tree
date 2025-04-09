@@ -1,54 +1,46 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "node_modules/@openzeppelin/contracts/access/AccessControl.sol";
-import "node_modules/@openzeppelin/contracts/utils/Pausable.sol";
-import "node_modules/@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import "node_modules/@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-    // Custom errors
-    error InvalidAddress();
-    error ContractRecovered(address by, uint256 timestamp); // Added timestamp parameter
-    error SubscriptionExpiredError(uint256 expiredAt); // Renamed to avoid conflict
-    error InvalidInput();
-    error OperationTooFrequent();
+// Custom errors
+error InvalidAddress();
+error ContractRecovered(address by, uint256 timestamp);
+error SubscriptionExpiredError(uint256 expiredAt);
+error InvalidInput();
+error OperationTooFrequent();
+error InsufficientPayment();
+error WithdrawalFailed();
 
-    error InsufficientPayment();
-    error WithdrawalFailed();
+/**
+ * @title IRoleRegistry
+ * @dev Interface for centralized role management
+ */
+interface IRoleRegistry {
+    function checkRole(bytes32 role, address account, address school) external view returns (bool);
+    function grantSchoolRole(bytes32 role, address account, address school) external;
+    function revokeSchoolRole(bytes32 role, address account, address school) external;
+    function hasRole(bytes32 role, address account) external view returns (bool);
+}
 
-// Import interfaces
 interface IRevenueSystem {
     function certificateFee() external view returns (uint256);
     function programCreationFee() external view returns (uint256);
     function issueCertificate(address studentAddress, uint256 batchId) external payable;
     function processTuitionPayment(address student, uint256 amount) external payable;
-    function setCustomFeeStructure(
-        address school,
-        uint256 programFee,
-        uint256 subscriptionFee,
-        uint256 certificateFee,
-        uint256 revenueShare
-    ) external;
 }
 
 interface IStudentProfile {
-    struct Reputation {
-        uint256 attendancePoints;
-        uint256 behaviorPoints;
-        uint256 academicPoints;
-        uint256 lastUpdateTime;
-    }
-    
-    function getStudentReputation(address student) external view returns (Reputation memory);
     function isStudentOfSchool(address student, address school) external view returns (bool);
+    function getStudentProgram(address student) external view returns (uint256);
     function updateReputation(
         address student,
         uint256 attendancePoints,
         uint256 behaviorPoints,
         uint256 academicPoints
     ) external;
-    function validateProgramEnrollment(address student, uint256 programId) external view returns (bool);
-    function getStudentProgram(address student) external view returns (uint256);
 }
 
 interface ITuitionSystem {
@@ -60,7 +52,7 @@ interface ITuitionSystem {
  * @title SchoolManagementBase
  * @dev Base contract with shared functionality for school management
  */
-contract SchoolManagementBase is AccessControl, Pausable, Initializable, ReentrancyGuard {
+contract SchoolManagementBase is Pausable, Initializable, ReentrancyGuard {
     // Constants
     uint256 public constant MAX_STRING_LENGTH = 50;
     uint256 public constant MIN_TERM_FEE = 0.01 ether;
@@ -72,7 +64,7 @@ contract SchoolManagementBase is AccessControl, Pausable, Initializable, Reentra
     uint256 public constant REGISTRATION_BURST_LIMIT = 50;
     uint256 public constant BURST_WINDOW = 1 hours;
     
-    // Roles
+    // Role definitions - kept for readability but used via registry
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant TEACHER_ROLE = keccak256("TEACHER_ROLE");
     bytes32 public constant MASTER_ADMIN_ROLE = keccak256("MASTER_ADMIN_ROLE");
@@ -90,6 +82,7 @@ contract SchoolManagementBase is AccessControl, Pausable, Initializable, Reentra
     IRevenueSystem public revenueSystem;
     IStudentProfile public studentProfile;
     ITuitionSystem public tuitionSystem;
+    IRoleRegistry public roleRegistry;
     
     // Events
     event ContractRecoveredEvent(address indexed recoveredBy, uint256 timestamp);
@@ -101,18 +94,11 @@ contract SchoolManagementBase is AccessControl, Pausable, Initializable, Reentra
         address indexed revenueSystem,
         address indexed studentProfile, 
         address indexed tuitionSystem,
-        address masterAdmin,
-        address organizationAdmin
+        address masterAdmin
     );
     event EthReceived(address indexed sender, uint256 amount);
     event FallbackCalled(address indexed sender, uint256 amount);
     event EmergencyWithdrawal(address indexed recipient, uint256 amount);
-    event FeeStructureUpdated(
-        uint256 programFee,
-        uint256 certificateFee,
-        uint256 subscriptionFee,
-        uint256 revenueShare
-    );
     
     /**
      * @dev Initialize the base contract
@@ -121,25 +107,22 @@ contract SchoolManagementBase is AccessControl, Pausable, Initializable, Reentra
         address _revenueSystem,
         address _studentProfile,
         address _tuitionSystem,
-        address _masterAdmin,
-        address _organizationAdmin
-    ) public initializer {
+        address _roleRegistry,
+        address _masterAdmin
+    ) public virtual initializer {
         if (_revenueSystem == address(0) || 
             _studentProfile == address(0) || 
             _tuitionSystem == address(0) || 
-            _masterAdmin == address(0) || 
-            _organizationAdmin == address(0)) {
+            _roleRegistry == address(0) ||
+            _masterAdmin == address(0)) {
             revert InvalidAddress();
         }
         
         revenueSystem = IRevenueSystem(_revenueSystem);
         studentProfile = IStudentProfile(_studentProfile);
         tuitionSystem = ITuitionSystem(_tuitionSystem);
+        roleRegistry = IRoleRegistry(_roleRegistry);
         masterAdmin = _masterAdmin;
-        
-        _grantRole(MASTER_ADMIN_ROLE, _masterAdmin);
-        _grantRole(ADMIN_ROLE, _organizationAdmin);
-        _grantRole(DEFAULT_ADMIN_ROLE, _organizationAdmin);
         
         subscriptionEndTime = uint64(block.timestamp + 30 days);
         
@@ -147,9 +130,17 @@ contract SchoolManagementBase is AccessControl, Pausable, Initializable, Reentra
             _revenueSystem,
             _studentProfile,
             _tuitionSystem, 
-            _masterAdmin,
-            _organizationAdmin
+            _masterAdmin
         );
+    }
+    
+    /**
+     * @dev Modifier to check role authorization via the RoleRegistry
+     */
+    modifier onlyRole(bytes32 role) {
+        require(roleRegistry.checkRole(role, msg.sender, address(this)), 
+                "Missing required role");
+        _;
     }
     
     /**
@@ -225,36 +216,6 @@ contract SchoolManagementBase is AccessControl, Pausable, Initializable, Reentra
         (bool success, ) = payable(masterAdmin).call{value: amount}("");
         if (!success) revert WithdrawalFailed();
         emit EmergencyWithdrawal(masterAdmin, amount);
-    }
-    
-    /**
-     * @dev Update program fees
-     */
-    function updateProgramFees(
-        uint256 programFee,
-        uint256 certificateFee,
-        uint256 subscriptionFee,
-        uint256 revenueShare
-    ) external onlyRole(ADMIN_ROLE) {
-        if (programFee == 0 || certificateFee == 0 || subscriptionFee == 0)
-            revert InvalidInput();
-        if (revenueShare > 100)
-            revert InvalidInput();
-        
-        revenueSystem.setCustomFeeStructure(
-            address(this),
-            programFee,
-            subscriptionFee,
-            certificateFee,
-            revenueShare
-        );
-        
-        emit FeeStructureUpdated(
-            programFee,
-            certificateFee,
-            subscriptionFee,
-            revenueShare
-        );
     }
     
     /**

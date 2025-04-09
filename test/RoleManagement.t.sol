@@ -31,11 +31,55 @@ contract MockTuitionSystem {
     }
 }
 
+contract MockRoleRegistry {
+    // Role storage
+    mapping(bytes32 => mapping(address => bool)) public globalRoles;
+    mapping(address => mapping(bytes32 => mapping(address => bool))) public schoolRoles;
+    
+    // Events
+    event SchoolRoleGranted(bytes32 indexed role, address indexed account, address indexed school);
+    event SchoolRoleRevoked(bytes32 indexed role, address indexed account, address indexed school);
+    
+    function initialize(address masterAdmin) public {
+        bytes32 masterAdminRole = keccak256("MASTER_ADMIN_ROLE");
+        bytes32 defaultAdminRole = 0x00;
+        globalRoles[masterAdminRole][masterAdmin] = true;
+        globalRoles[defaultAdminRole][masterAdmin] = true;
+    }
+    
+    function checkRole(bytes32 role, address account, address school) public view returns (bool) {
+        return globalRoles[role][account] || schoolRoles[school][role][account];
+    }
+    
+    function grantSchoolRole(bytes32 role, address account, address school) external {
+        schoolRoles[school][role][account] = true;
+        emit SchoolRoleGranted(role, account, school);
+    }
+    
+    function revokeSchoolRole(bytes32 role, address account, address school) external {
+        schoolRoles[school][role][account] = false;
+        emit SchoolRoleRevoked(role, account, school);
+    }
+    
+    function grantGlobalRole(bytes32 role, address account) external {
+        globalRoles[role][account] = true;
+    }
+    
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        return globalRoles[role][account];
+    }
+    
+    function hasSchoolRole(bytes32 role, address account, address school) external view returns (bool) {
+        return schoolRoles[school][role][account];
+    }
+}
+
 contract RoleManagementTest is Test {
     RoleManagement roleManagement;
     MockRevenueSystem revenueSystem;
     MockStudentProfile studentProfile;
     MockTuitionSystem tuitionSystem;
+    MockRoleRegistry roleRegistry;
     
     address masterAdmin;
     address organizationAdmin;
@@ -64,6 +108,11 @@ contract RoleManagementTest is Test {
         revenueSystem = new MockRevenueSystem();
         studentProfile = new MockStudentProfile();
         tuitionSystem = new MockTuitionSystem();
+        roleRegistry = new MockRoleRegistry();
+        roleRegistry.initialize(masterAdmin);
+        
+        // Grant admin role to organizationAdmin
+        roleRegistry.grantGlobalRole(ADMIN_ROLE, organizationAdmin);
         
         // Deploy implementation
         RoleManagement implementation = new RoleManagement();
@@ -76,8 +125,8 @@ contract RoleManagementTest is Test {
                 address(revenueSystem),
                 address(studentProfile),
                 address(tuitionSystem),
-                masterAdmin,
-                organizationAdmin
+                address(roleRegistry),
+                masterAdmin
             )
         );
         
@@ -91,9 +140,14 @@ contract RoleManagementTest is Test {
     
     function test_InitialRoles() public view {
         // Verify initial roles
-        assertTrue(roleManagement.hasRole(MASTER_ADMIN_ROLE, masterAdmin));
-        assertTrue(roleManagement.hasRole(ADMIN_ROLE, organizationAdmin));
-        assertTrue(roleManagement.hasRole(roleManagement.DEFAULT_ADMIN_ROLE(), organizationAdmin));
+        // RoleManagement doesn't have hasRole function but should provide checkRole
+        // assertTrue(roleManagement.hasRole(MASTER_ADMIN_ROLE, masterAdmin));
+        // assertTrue(roleManagement.hasRole(ADMIN_ROLE, organizationAdmin));
+        // assertTrue(roleManagement.hasRole(roleManagement.DEFAULT_ADMIN_ROLE(), organizationAdmin));
+        
+        // Replace with direct role checker functions
+        assertTrue(roleManagement.hasMasterAdminRole(masterAdmin));
+        assertTrue(roleManagement.hasAdminRole(organizationAdmin));
     }
     
     function test_AddTeacher() public {
@@ -105,7 +159,8 @@ contract RoleManagementTest is Test {
         roleManagement.addTeacher(teacher);
         
         assertTrue(roleManagement.hasTeacherRole(teacher));
-        assertTrue(roleManagement.hasRole(TEACHER_ROLE, teacher));
+        // Replace hasRole with hasTeacherRole
+        // assertTrue(roleManagement.hasRole(TEACHER_ROLE, teacher));
         
         vm.stopPrank();
     }
@@ -121,7 +176,8 @@ contract RoleManagementTest is Test {
         roleManagement.removeTeacher(teacher);
         
         assertFalse(roleManagement.hasTeacherRole(teacher));
-        assertFalse(roleManagement.hasRole(TEACHER_ROLE, teacher));
+        // Replace hasRole with hasTeacherRole
+        // assertFalse(roleManagement.hasRole(TEACHER_ROLE, teacher));
         
         vm.stopPrank();
     }
@@ -352,14 +408,11 @@ contract RoleManagementTest is Test {
     function test_RoleHierarchy() public {
         // Update approach to reflect the actual role hierarchy
         
-        // The organizationAdmin already has both DEFAULT_ADMIN_ROLE and ADMIN_ROLE from setUp
-        // So we should use organizationAdmin to grant roles
-        vm.startPrank(organizationAdmin);
-        
-        // Grant admin role to another account
+        // Create a new admin account
         address newAdmin = makeAddr("newAdmin");
-        roleManagement.grantRole(ADMIN_ROLE, newAdmin);
-        vm.stopPrank();
+        
+        // Grant admin role to the new admin account via roleRegistry
+        roleRegistry.grantGlobalRole(ADMIN_ROLE, newAdmin);
         
         // Verify new admin can add teachers
         vm.startPrank(newAdmin);
@@ -369,7 +422,7 @@ contract RoleManagementTest is Test {
         
         // Verify teacher cannot add other teachers
         vm.startPrank(teacher);
-        vm.expectRevert();
+        vm.expectRevert("Missing required role");
         roleManagement.addTeacher(secondTeacher);
         vm.stopPrank();
     }

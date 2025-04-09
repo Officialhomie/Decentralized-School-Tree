@@ -120,20 +120,42 @@ contract MockTuitionSystem {
     }
 }
 
+contract MockRoleRegistry is IRoleRegistry {
+    // Role storage
+    mapping(bytes32 => mapping(address => mapping(address => bool))) private _roles;
+    mapping(bytes32 => mapping(address => bool)) private _globalRoles;
+    
+    function checkRole(bytes32 role, address account, address school) external view returns (bool) {
+        return _roles[role][account][school];
+    }
+    
+    function grantSchoolRole(bytes32 role, address account, address school) external {
+        _roles[role][account][school] = true;
+    }
+    
+    function revokeSchoolRole(bytes32 role, address account, address school) external {
+        _roles[role][account][school] = false;
+    }
+    
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        return _globalRoles[role][account];
+    }
+}
+
 contract TestableSchoolManagementBase is SchoolManagementBase {
     function setupForTest(
         address _revenueSystem,
         address _studentProfile,
         address _tuitionSystem,
-        address _masterAdmin,
-        address _organizationAdmin
+        address _roleRegistry,
+        address _masterAdmin
     ) external {
         initialize(
             _revenueSystem,
             _studentProfile,
             _tuitionSystem,
-            _masterAdmin,
-            _organizationAdmin
+            _roleRegistry,
+            _masterAdmin
         );
     }
 }
@@ -145,6 +167,7 @@ contract AttendanceTrackingTest is Test {
     MockStudentProfile studentProfile;
     MockRevenueSystem revenueSystem;
     MockTuitionSystem tuitionSystem;
+    MockRoleRegistry roleRegistry;
 
     address masterAdmin;
     address organizationAdmin;
@@ -178,6 +201,10 @@ contract AttendanceTrackingTest is Test {
         studentProfile = new MockStudentProfile();
         revenueSystem = new MockRevenueSystem();
         tuitionSystem = new MockTuitionSystem();
+        roleRegistry = new MockRoleRegistry();
+        
+        // Grant master admin role
+        roleRegistry.grantSchoolRole(MASTER_ADMIN_ROLE, masterAdmin, address(0));
 
         console.log("3. Deploying implementation");
         // Deploy implementation
@@ -192,8 +219,8 @@ contract AttendanceTrackingTest is Test {
                 address(revenueSystem),
                 address(studentProfile),
                 address(tuitionSystem),
-                masterAdmin,
-                organizationAdmin
+                address(roleRegistry),
+                masterAdmin
             )
         );
 
@@ -201,18 +228,15 @@ contract AttendanceTrackingTest is Test {
         // Get the proxied AttendanceTracking
         attendanceTracking = AttendanceTracking(payable(address(proxy)));
 
-        console.log("6. Checking roles");
-        // Check roles
-        console.log("masterAdmin has MASTER_ADMIN_ROLE:", attendanceTracking.hasRole(MASTER_ADMIN_ROLE, masterAdmin));
-        console.log("organizationAdmin has ADMIN_ROLE:", attendanceTracking.hasRole(ADMIN_ROLE, organizationAdmin));
-        console.log("organizationAdmin has DEFAULT_ADMIN_ROLE:", attendanceTracking.hasRole(DEFAULT_ADMIN_ROLE, organizationAdmin));
-
-        console.log("7. Granting teacher role");
-        // Grant teacher role
-        vm.prank(organizationAdmin);
-        attendanceTracking.grantRole(TEACHER_ROLE, teacher);
+        console.log("7. Setting up roles");
+        // Grant roles via the role registry
+        vm.startPrank(masterAdmin);
+        roleRegistry.grantSchoolRole(ADMIN_ROLE, organizationAdmin, address(attendanceTracking));
         vm.stopPrank();
-
+        
+        vm.startPrank(organizationAdmin);
+        roleRegistry.grantSchoolRole(TEACHER_ROLE, teacher, address(attendanceTracking));
+        vm.stopPrank();
 
         console.log("8. Setting management contracts");
         // Set management contracts
@@ -332,9 +356,17 @@ contract AttendanceTrackingTest is Test {
         // Create a pattern of attendance: Present, Absent, Present
         attendanceTracking.recordAttendance(student, programId, true);
         
+        // Wait for rate limiting cooldown
+        vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+        
+        // Advance time for daily limit
         vm.warp(block.timestamp + 25 hours);
         attendanceTracking.recordAttendance(student, programId, false);
         
+        // Wait for rate limiting cooldown
+        vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+        
+        // Advance time for daily limit
         vm.warp(block.timestamp + 25 hours);
         attendanceTracking.recordAttendance(student, programId, true);
         
@@ -424,8 +456,17 @@ contract AttendanceTrackingTest is Test {
         // Record sufficient attendance (90% with 80% requirement)
         for (uint i = 0; i < 9; i++) {
             attendanceTracking.recordAttendance(student, programId, true);
+            
+            // Wait for rate limiting cooldown
+            vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+            
+            // Advance time for daily limit
             vm.warp(block.timestamp + 25 hours);
         }
+        
+        // Wait for rate limiting cooldown
+        vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+        
         attendanceTracking.recordAttendance(student, programId, false);
         
         // Check if requirement is met
@@ -441,10 +482,21 @@ contract AttendanceTrackingTest is Test {
         // Record insufficient attendance (70% with 80% requirement)
         for (uint i = 0; i < 7; i++) {
             attendanceTracking.recordAttendance(student, programId, true);
+            
+            // Wait for rate limiting cooldown
+            vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+            
+            // Advance time for daily limit
             vm.warp(block.timestamp + 25 hours);
         }
+        
         for (uint i = 0; i < 3; i++) {
             attendanceTracking.recordAttendance(student, programId, false);
+            
+            // Wait for rate limiting cooldown
+            vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+            
+            // Advance time for daily limit
             vm.warp(block.timestamp + 25 hours);
         }
         
@@ -469,6 +521,11 @@ contract AttendanceTrackingTest is Test {
             // Record 20 attendance records per batch
             for (uint i = 0; i < 20; i++) {
                 attendanceTracking.recordAttendance(student, programId, true);
+                
+                // Wait for rate limiting cooldown
+                vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
+                
+                // Advance time for daily limit
                 vm.warp(block.timestamp + 25 hours);
             }
         }
@@ -529,10 +586,15 @@ contract AttendanceTrackingTest is Test {
             );
         }
         
+        // Reset the burst window start time to ensure clean state
+        vm.warp(block.timestamp + 2 hours); // Way beyond the BURST_WINDOW
+        
         // Record attendance for REGISTRATION_BURST_LIMIT students
         for (uint i = 0; i < 50; i++) { // REGISTRATION_BURST_LIMIT is 50
             attendanceTracking.recordAttendance(students[i], programId, true);
-            vm.warp(block.timestamp + 2); // Wait for cooldown between each
+            
+            // Wait for cooldown between each
+            vm.warp(block.timestamp + 2); // Longer than REGISTRATION_COOLDOWN
         }
         
         // Try to record one more within the burst window
@@ -549,6 +611,9 @@ contract AttendanceTrackingTest is Test {
     }
     
     function test_PauseAndUnpause() public {
+        // Grant MASTER_ADMIN_ROLE directly to masterAdmin for this specific test
+        roleRegistry.grantSchoolRole(MASTER_ADMIN_ROLE, masterAdmin, address(attendanceTracking));
+        
         // Pause the contract
         vm.prank(masterAdmin);
         attendanceTracking.pause();
@@ -556,8 +621,8 @@ contract AttendanceTrackingTest is Test {
         // Verify contract is paused
         assertTrue(attendanceTracking.paused());
         
-        // Record attendance while paused - this should actually work
-        // since recordAttendance doesn't have the whenNotPaused modifier
+        // Check that recordAttendance should still work when paused
+        // AttendanceTracking.recordAttendance does not use whenNotPaused modifier
         vm.prank(teacher);
         attendanceTracking.recordAttendance(student, programId, true);
         
@@ -568,7 +633,7 @@ contract AttendanceTrackingTest is Test {
         // Verify contract is unpaused
         assertFalse(attendanceTracking.paused());
         
-        // Should still work after unpausing (need to wait 24 hours due to daily limit)
+        // Should work after unpausing (need to wait for the daily limit)
         vm.warp(block.timestamp + 25 hours);
         vm.prank(teacher);
         attendanceTracking.recordAttendance(student, programId, true);
@@ -595,6 +660,9 @@ contract AttendanceTrackingTest is Test {
                 expectedAbsent++;
                 expectedConsecutive = 0;
             }
+            
+            // Wait for rate limiting cooldown
+            vm.warp(block.timestamp + 2); // REGISTRATION_COOLDOWN is 1 second
             
             // Wait for daily limit
             vm.warp(block.timestamp + 25 hours);

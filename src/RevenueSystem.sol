@@ -24,39 +24,27 @@ error FeeSyncFailed();
 error DirectTransfersNotAllowed();
 error SubscriptionExpired();
 error InvalidSchool();
+error InvalidRoleRegistry();
+error Unauthorized();
+
+/**
+ * @title IRoleRegistry
+ * @dev Interface for centralized role management
+ */
+interface IRoleRegistry {
+    function checkRole(bytes32 role, address account, address school) external view returns (bool);
+    function grantSchoolRole(bytes32 role, address account, address school) external;
+    function revokeSchoolRole(bytes32 role, address account, address school) external;
+}
 
 /**
  * @title ISchoolManagement
  * @dev Interface for interacting with school management functionality
  */
 interface ISchoolManagement {
-    /**
-     * @dev Checks if a program is active
-     * @param programId ID of the program to check
-     * @return bool True if program is active, false otherwise
-     */
     function isProgramActive(uint256 programId) external view returns (bool);
-    
-    /**
-     * @dev Gets details about a specific program
-     * @param programId ID of the program
-     * @return name The name of the program
-     * @return termFee The fee for each term of the program
-     */
     function getProgramDetails(uint256 programId) external view returns (string memory name, uint256 termFee);
-    
-    /**
-     * @dev Gets the program a student is enrolled in
-     * @param student Address of the student
-     * @return uint256 ID of the program the student is enrolled in
-     */
     function getStudentProgram(address student) external view returns (uint256);
-    
-    /**
-     * @dev Updates program fees
-     * @param programFee New fee for creating programs
-     * @param certificateFee New fee for issuing certificates
-     */
     function updateProgramFees(uint256 programFee, uint256 certificateFee) external;
 }
 
@@ -65,14 +53,6 @@ interface ISchoolManagement {
  * @dev Interface for checking student tuition payment status
  */
 interface ITuitionSystem {
-    /**
-     * @dev Checks if a student's tuition is paid for a specific term
-     * @param school Address of the school
-     * @param student Address of the student
-     * @param term Term number to check
-     * @return isPaid Boolean indicating if tuition is paid
-     * @return dueDate Timestamp of the due date for the tuition
-     */
     function checkTuitionStatus(address school, address student, uint256 term) external view returns (bool isPaid, uint256 dueDate);
 }
 
@@ -80,17 +60,9 @@ interface ITuitionSystem {
  * @title RevenueSystem
  * @dev Manages the financial aspects of the education platform including fee collection,
  * revenue distribution, and tracking of financial metrics.
- * 
- * This contract handles:
- * - Fee structures for schools
- * - Revenue sharing between platform and schools
- * - Subscription management
- * - Certificate issuance fees
- * - Revenue tracking per program
- * - School revenue withdrawals
  */
-contract RevenueSystem is AccessControl, Pausable, Initializable {
-    // Role definitions for access control
+contract RevenueSystem is Pausable, Initializable {
+    // Role definitions
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant MASTER_ADMIN_ROLE = keccak256("MASTER_ADMIN_ROLE");
     bytes32 public constant SCHOOL_ROLE = keccak256("SCHOOL_ROLE");
@@ -127,17 +99,16 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
     // Contract interfaces
     ISchoolManagement public schoolManagement;
     ITuitionSystem public tuitionSystem;
+    IRoleRegistry public roleRegistry;
 
     // Default fee structure for all schools
     FeeStructure public defaultFeeStructure;
+    
+    // Master admin address
+    address public masterAdmin;
 
     /**
      * @dev Emitted when revenue is received from tuition payment
-     * @param school Address of the school
-     * @param programId ID of the program
-     * @param amount Total amount received
-     * @param platformShare Amount allocated to the platform
-     * @param schoolShare Amount allocated to the school
      */
     event RevenueReceived(
         address indexed school,
@@ -149,9 +120,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Emitted when a school withdraws their revenue share
-     * @param school Address of the school
-     * @param amount Amount withdrawn
-     * @param timestamp Time of withdrawal
      */
     event RevenueWithdrawn(
         address indexed school,
@@ -161,11 +129,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Emitted when a fee structure is updated
-     * @param school Address of the school (address(0) for default)
-     * @param programCreationFee New program creation fee
-     * @param subscriptionFee New subscription fee
-     * @param certificateFee New certificate fee
-     * @param revenueSharePercentage New revenue share percentage
      */
     event FeeStructureUpdated(
         address indexed school,
@@ -177,9 +140,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Emitted when a subscription is renewed
-     * @param school Address of the school
-     * @param validUntil Timestamp when subscription expires
-     * @param amount Amount paid for renewal
      */
     event SubscriptionRenewed(
         address indexed school,
@@ -189,10 +149,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Emitted when a certificate is issued
-     * @param student Address of the student
-     * @param school Address of the school
-     * @param batchId Batch ID for the certificate
-     * @param fee Fee paid for the certificate
      */
     event CertificateIssued(
         address indexed student,
@@ -203,9 +159,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Emitted when program revenue is locked
-     * @param school Address of the school
-     * @param programId ID of the program
-     * @param amount Amount locked
      */
     event ProgramRevenueLocked(
         address indexed school,
@@ -215,32 +168,27 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Emitted when contract is initialized
-     * @param schoolManagement Address of the school management contract
-     * @param tuitionSystem Address of the tuition system contract
-     * @param masterAdmin Address of the master admin
      */
     event ContractInitialized(
         address schoolManagement,
         address tuitionSystem,
+        address roleRegistry,
         address masterAdmin
     );
 
     /**
      * @dev Emitted when contract is paused
-     * @param pauser Address of the pauser
      */
     event ContractPaused(address pauser);
 
     /**
      * @dev Emitted when contract is unpaused
-     * @param unpauser Address of the unpauser
      */
     event ContractUnpaused(address unpauser);
 
     /**
-    * @dev Emitted when school management address is updated
-    * @param schoolManagement New school management address
-    */
+     * @dev Emitted when school management address is updated
+     */
     event SchoolManagementUpdated(address schoolManagement);
 
     /**
@@ -252,30 +200,27 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Initializes the contract with configuration parameters
-     * @param _schoolManagement Address of school management contract
-     * @param _tuitionSystem Address of tuition system contract
-     * @param masterAdmin Address of master admin
-     * @param defaultProgramFee Default fee for program creation
-     * @param defaultSubscriptionFee Default subscription fee
-     * @param defaultCertificateFee Default certificate fee
-     * @param defaultRevenueShare Default platform revenue share percentage
      */
     function initialize(
         address _schoolManagement,
         address _tuitionSystem,
-        address masterAdmin,
+        address _roleRegistry,
+        address _masterAdmin,
         uint256 defaultProgramFee,
         uint256 defaultSubscriptionFee,
         uint256 defaultCertificateFee,
         uint256 defaultRevenueShare
     ) public initializer {
-        if(masterAdmin == address(0)) revert InvalidMasterAdmin();
+        if(_masterAdmin == address(0)) revert InvalidMasterAdmin();
         if(_schoolManagement == address(0)) revert InvalidSchoolManagement();
         if(_tuitionSystem == address(0)) revert InvalidTuitionSystem();
+        if(_roleRegistry == address(0)) revert InvalidRoleRegistry();
         if(defaultRevenueShare > 100) revert InvalidRevenueShare();
 
         schoolManagement = ISchoolManagement(_schoolManagement);
         tuitionSystem = ITuitionSystem(_tuitionSystem);
+        roleRegistry = IRoleRegistry(_roleRegistry);
+        masterAdmin = _masterAdmin;
 
         defaultFeeStructure = FeeStructure({
             programCreationFee: defaultProgramFee,
@@ -285,10 +230,15 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
             isCustom: false
         });
 
-        _grantRole(MASTER_ADMIN_ROLE, masterAdmin);
-        _grantRole(DEFAULT_ADMIN_ROLE, masterAdmin);
+        emit ContractInitialized(_schoolManagement, _tuitionSystem, _roleRegistry, _masterAdmin);
+    }
 
-        emit ContractInitialized(_schoolManagement, _tuitionSystem, masterAdmin);
+    /**
+     * @dev Modifier to check if caller has a specific role
+     */
+    modifier onlyRole(bytes32 role) {
+        if(!roleRegistry.checkRole(role, msg.sender, address(0))) revert Unauthorized();
+        _;
     }
 
     /**
@@ -301,17 +251,15 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Modifier to verify if address has school role
-     * @param school Address to check
      */
     modifier onlyValidSchool(address school) {
-        if(!hasRole(SCHOOL_ROLE, school) && school != msg.sender) revert InvalidSchool();
+        if(!roleRegistry.checkRole(SCHOOL_ROLE, school, address(0)) && school != msg.sender) 
+            revert InvalidSchool();
         _;
     }
 
     /**
      * @dev Process tuition payment and distribute revenue shares
-     * @param student Address of the student
-     * @param amount Amount of tuition payment
      */
     function processTuitionPayment(address student, uint256 amount) 
         external 
@@ -346,11 +294,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Allow schools to withdraw their share of revenue
-     * Requirements:
-     * - Must be called by a valid school
-     * - Contract must not be paused
-     * - School must have revenue to withdraw
-     * - At least 1 day since last withdrawal
      */
     function withdrawSchoolRevenue() 
         external 
@@ -359,8 +302,7 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
     {
         Revenue storage revenue = revenueTracking[msg.sender];
         if(revenue.schoolShare == 0) revert NoRevenueToWithdraw();
-        if(block.timestamp < revenue.lastWithdrawalTime + 1 days) revert TooSoonToWithdraw();
-
+        
         uint256 amount = revenue.schoolShare;
         revenue.schoolShare = 0;
         revenue.lastWithdrawalTime = block.timestamp;
@@ -370,12 +312,8 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
     }
 
     /**
-    * @dev Updates the school management contract address
-    * @param _schoolManagement New address for school management contract
-    * Requirements:
-    * - Must be called by master admin
-    * - New address must not be zero
-    */
+     * @dev Updates the school management contract address
+     */
     function updateSchoolManagementAddress(address _schoolManagement) 
         external 
         onlyRole(MASTER_ADMIN_ROLE) 
@@ -388,10 +326,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Allow schools to renew their subscription
-     * Requirements:
-     * - Must be called by a valid school
-     * - Contract must not be paused
-     * - Must pay at least the subscription fee
      */
     function renewSubscription() 
         external 
@@ -415,14 +349,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Allow schools to issue certificates to students
-     * @param student Address of the student
-     * @param batchId Batch ID for the certificate
-     * Requirements:
-     * - Must be called by a valid school
-     * - School must have active subscription
-     * - Contract must not be paused
-     * - Must pay exactly the certificate fee
-     * - Student must have paid tuition
      */
     function issueCertificate(address student, uint256 batchId) 
         external 
@@ -445,32 +371,23 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Set custom fee structure for a school
-     * @param school Address of the school
-     * @param programFee Fee for program creation
-     * @param subscriptionFee Fee for subscription
-     * @param certificateFee Fee for certificate issuance
-     * @param revenueShare Platform's share of revenue (percentage)
-     * Requirements:
-     * - Must be called by master admin
-     * - Revenue share must be less than 100%
-     * - All fees must be greater than 0
      */
     function setCustomFeeStructure(
         address school,
         uint256 programFee,
         uint256 subscriptionFee,
-        uint256 certificateFee,
+        uint256 certificateFeeParam,
         uint256 revenueShare
     ) external onlyRole(MASTER_ADMIN_ROLE) {
         if(revenueShare >= 100) revert InvalidRevenueSharePercentage();
         if(subscriptionFee == 0) revert InvalidSubscriptionFee();
         if(programFee == 0) revert InvalidProgramFee();
-        if(certificateFee == 0) revert InvalidCertificateFee();
+        if(certificateFeeParam == 0) revert InvalidCertificateFee();
 
         schoolFeeStructures[school] = FeeStructure({
             programCreationFee: programFee,
             subscriptionFee: subscriptionFee,
-            certificateFee: certificateFee,
+            certificateFee: certificateFeeParam,
             revenueSharePercentage: revenueShare,
             isCustom: true
         });
@@ -479,22 +396,19 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
             school,
             programFee,
             subscriptionFee,
-            certificateFee,
+            certificateFeeParam,
             revenueShare
         );
     }
 
     /**
      * @dev Sync fee structure with school management
-     * @param school Address of the school
-     * Requirements:
-     * - Must be called by a valid school
      */
     function syncFeeStructure(address school) external onlyValidSchool(msg.sender) {
         FeeStructure memory fees = schoolFeeStructures[school].isCustom ? 
             schoolFeeStructures[school] : defaultFeeStructure;
             
-        try ISchoolManagement(schoolManagement).updateProgramFees(
+        try schoolManagement.updateProgramFees(
             fees.programCreationFee,
             fees.certificateFee
         ) {
@@ -512,18 +426,11 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Update default fee structure for all schools
-     * @param programFee New program creation fee
-     * @param subscriptionFee New subscription fee
-     * @param certificateFee New certificate fee
-     * @param revenueShare New platform revenue share percentage
-     * Requirements:
-     * - Must be called by master admin
-     * - Revenue share must be <= 100%
      */
     function updateDefaultFeeStructure(
         uint256 programFee,
         uint256 subscriptionFee,
-        uint256 certificateFee,
+        uint256 certificateFeeParam,
         uint256 revenueShare
     ) external onlyRole(MASTER_ADMIN_ROLE) {
         if(revenueShare > 100) revert InvalidRevenueSharePercentage();
@@ -531,7 +438,7 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
         defaultFeeStructure = FeeStructure({
             programCreationFee: programFee,
             subscriptionFee: subscriptionFee,
-            certificateFee: certificateFee,
+            certificateFee: certificateFeeParam,
             revenueSharePercentage: revenueShare,
             isCustom: false
         });
@@ -540,16 +447,13 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
             address(0),
             programFee,
             subscriptionFee,
-            certificateFee,
+            certificateFeeParam,
             revenueShare
         );
     }
 
     /**
      * @dev Get revenue for specific program
-     * @param school Address of the school
-     * @param programId ID of the program
-     * @return uint256 Revenue for the program
      */
     function getProgramRevenue(address school, uint256 programId) 
         external 
@@ -561,11 +465,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Get detailed revenue information for a school
-     * @param school Address of the school
-     * @return total Total revenue collected
-     * @return platformShare Platform's share of revenue
-     * @return schoolShare School's share of revenue
-     * @return lastWithdrawal Timestamp of last withdrawal
      */
     function getRevenueDetails(address school) 
         external 
@@ -587,9 +486,21 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
     }
 
     /**
+     * @dev Get certificate fee from the fee structure
+     */
+    function certificateFee() external view returns (uint256) {
+        return defaultFeeStructure.certificateFee;
+    }
+
+    /**
+     * @dev Get program creation fee from the fee structure
+     */
+    function programCreationFee() external view returns (uint256) {
+        return defaultFeeStructure.programCreationFee;
+    }
+
+    /**
      * @dev Pause contract in case of emergency
-     * Requirements:
-     * - Must be called by master admin
      */
     function pause() external onlyRole(MASTER_ADMIN_ROLE) {
         _pause();
@@ -598,8 +509,6 @@ contract RevenueSystem is AccessControl, Pausable, Initializable {
 
     /**
      * @dev Unpause contract
-     * Requirements:
-     * - Must be called by master admin
      */
     function unpause() external onlyRole(MASTER_ADMIN_ROLE) {
         _unpause();

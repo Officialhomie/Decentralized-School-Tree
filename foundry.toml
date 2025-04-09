@@ -8,9 +8,16 @@ remappings = [
 ]
 
 # Add these lines:
+thirdweb_api_key = "${THIRDWEB_API_KEY}"
+rpc_url = "https://656476.rpc.thirdweb.com/${THIRDWEB_API_KEY}"
 via_ir = true       # Enable the IR-based compiler pipeline
 optimizer = true    # Enable the optimizer
 optimizer_runs = 200
+
+private_key = "${PRIVATE_KEY}"
+admin_private_key = "${ADMIN_PRIVATE_KEY}"
+organization_address = "${ORGANIZATION_ADMIN}"
+
 
 
 

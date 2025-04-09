@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import "node_modules/@openzeppelin/contracts/access/AccessControl.sol";
 import "node_modules/@openzeppelin/contracts/utils/Pausable.sol";
 import "node_modules/@openzeppelin/contracts/proxy/utils/Initializable.sol";
-import "node_modules/@openzeppelin/contracts/utils/Strings.sol";
 
 // Custom errors
 error InvalidMasterAdmin();
@@ -44,7 +43,7 @@ interface ISchoolManagement {
  * @title StudentProfile
  * @dev Manages student profiles, reputations, and school enrollments
  */
-contract StudentProfile is AccessControl, Pausable, Initializable {
+contract StudentProfile is Pausable, Initializable {
     // Role identifiers
     bytes32 public constant TEACHER_ROLE = keccak256("TEACHER_ROLE");
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
@@ -99,6 +98,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
 
     // Interface instances
     ISchoolManagement public schoolManagement;
+    IRoleRegistry public roleRegistry;
     
     // Master admin address
     address public masterAdmin;
@@ -135,69 +135,23 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
      * @dev Initialize the contract
      */
     function initialize(
+        address _roleRegistry,
         address _masterAdmin
     ) public initializer {
         if(_masterAdmin == address(0)) revert InvalidMasterAdmin();
+        if(_roleRegistry == address(0)) revert InvalidRoleRegistry();
         
+        roleRegistry = IRoleRegistry(_roleRegistry);
         masterAdmin = _masterAdmin;
         
-        // Set up initial roles
-        _grantRole(DEFAULT_ADMIN_ROLE, _masterAdmin);
-        _grantRole(MASTER_ADMIN_ROLE, _masterAdmin);
-        
-        emit StudentInitialized(_masterAdmin, address(0));
-    }
-
-    /**
-     * @dev Returns true if account has been granted role
-     */
-    function hasRole(bytes32 role, address account) public view virtual override returns (bool) {
-        return super.hasRole(role, account);
-    }
-    
-    /**
-     * @dev Grants role to account
-     */
-    function grantRole(bytes32 role, address account) public virtual override {
-        if (!hasRole(DEFAULT_ADMIN_ROLE, _msgSender())) {
-            revert(
-                string(
-                    abi.encodePacked(
-                        "AccessControl: account ",
-                        Strings.toHexString(account),
-                        " is missing role ",
-                        Strings.toHexString(uint256(DEFAULT_ADMIN_ROLE), 32)
-                    )
-                )
-            );
-        }
-        _grantRole(role, account);
-    }
-
-    /**
-     * @dev Revokes role from account
-     */
-    function revokeRole(bytes32 role, address account) public virtual override {
-        if (!hasRole(DEFAULT_ADMIN_ROLE, _msgSender())) {
-            revert(
-                string(
-                    abi.encodePacked(
-                        "AccessControl: account ",
-                        Strings.toHexString(account),
-                        " is missing role ",
-                        Strings.toHexString(uint256(DEFAULT_ADMIN_ROLE), 32)
-                    )
-                )
-            );
-        }
-        _revokeRole(role, account);
+        emit StudentInitialized(_masterAdmin, _roleRegistry);
     }
 
     /**
      * @dev Modifier to check if caller has a specific role
      */
-    modifier onlyHasRole(bytes32 role) {
-        if(!hasRole(role, msg.sender)) revert Unauthorized();
+    modifier onlyRole(bytes32 role) {
+        if(!roleRegistry.checkRole(role, msg.sender, address(0))) revert Unauthorized();
         _;
     }
 
@@ -222,7 +176,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
      */
     function setSchoolManagement(address _schoolManagement) 
         external 
-        onlyHasRole(MASTER_ADMIN_ROLE) 
+        onlyRole(MASTER_ADMIN_ROLE) 
     {
         if(_schoolManagement == address(0)) revert InvalidAddress();
         if(address(schoolManagement) != address(0)) revert AlreadySet();
@@ -235,7 +189,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
      */
     function activateSchool(address school) 
         external 
-        onlyHasRole(MASTER_ADMIN_ROLE) 
+        onlyRole(MASTER_ADMIN_ROLE) 
     {
         isActiveSchool[school] = true;
         emit SchoolActivated(school);
@@ -246,7 +200,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
      */
     function deactivateSchool(address school) 
         external 
-        onlyHasRole(MASTER_ADMIN_ROLE) 
+        onlyRole(MASTER_ADMIN_ROLE) 
     {
         isActiveSchool[school] = false;
         emit SchoolDeactivated(school);
@@ -260,7 +214,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
         string memory name
     ) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
+        onlyRole(TEACHER_ROLE) 
         onlyActiveSchool 
         whenNotPaused 
     {
@@ -282,6 +236,9 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
 
         schoolStudentCount[msg.sender]++;
         
+        // Grant student role through role registry
+        roleRegistry.grantSchoolRole(STUDENT_ROLE, student, msg.sender);
+        
         emit StudentRegistered(student, name, msg.sender, 0);
         emit ReputationUpdated(
             student,
@@ -299,7 +256,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
         bool attended
     ) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
+        onlyRole(TEACHER_ROLE) 
         onlyActiveSchool 
         onlyActiveStudent(student)
         whenNotPaused 
@@ -350,7 +307,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
         uint256 academicPoints
     ) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
+        onlyRole(TEACHER_ROLE) 
         onlyActiveStudent(student)
         whenNotPaused 
     {
@@ -379,7 +336,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
         string memory reason
     ) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
+        onlyRole(TEACHER_ROLE) 
         onlyActiveStudent(student)
     {
         if(students[student].school != msg.sender) revert Unauthorized();
@@ -401,7 +358,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
      */
     function completeStudentTerm(address student) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
+        onlyRole(TEACHER_ROLE) 
         onlyActiveStudent(student)
     {
         if(students[student].school != msg.sender) revert Unauthorized();
@@ -421,7 +378,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
         address newSchool
     ) 
         external 
-        onlyHasRole(MASTER_ADMIN_ROLE) 
+        onlyRole(MASTER_ADMIN_ROLE) 
         onlyActiveStudent(student)
     {
         if(!isActiveSchool[newSchool]) revert InvalidNewSchool();
@@ -431,6 +388,10 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
         schoolStudentCount[oldSchool]--;
         schoolStudentCount[newSchool]++;
         
+        // Revoke and grant student role through role registry
+        roleRegistry.revokeSchoolRole(STUDENT_ROLE, student, oldSchool);
+        roleRegistry.grantSchoolRole(STUDENT_ROLE, student, newSchool);
+
         emit StudentTransferred(student, oldSchool, newSchool);
     }
 
@@ -439,23 +400,27 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
      */
     function deactivateStudent(address student) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
+        onlyRole(TEACHER_ROLE) 
     {
         if(students[student].school != msg.sender) revert Unauthorized();
         students[student].isActive = false;
+        
+        // Revoke student role through role registry
+        roleRegistry.revokeSchoolRole(STUDENT_ROLE, student, msg.sender);
         
         emit StudentDeactivated(student, block.timestamp);
     }
 
     /**
-     * @dev Get student reputation information
+     * @dev Get student reputation
      */
     function getStudentReputation(address student) 
         external 
         view 
         returns (Reputation memory) 
     {
-        if(students[student].school != msg.sender && !hasRole(MASTER_ADMIN_ROLE, msg.sender))
+        if(!students[student].isRegistered) revert StudentNotRegistered();
+        if(students[student].school != msg.sender && !roleRegistry.checkRole(MASTER_ADMIN_ROLE, msg.sender, address(0))) 
             revert Unauthorized();
         return students[student].reputation;
     }
@@ -550,12 +515,12 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
     }
 
     /**
-     * @dev Update student's program ID
+     * @dev Update student program
      */
     function updateStudentProgram(address student, uint256 programId) 
         external 
-        onlyHasRole(TEACHER_ROLE) 
-        onlyActiveStudent(student)
+        onlyRole(TEACHER_ROLE) 
+        onlyActiveStudent(student) 
     {
         if(students[student].school != msg.sender) revert Unauthorized();
         if(!schoolManagement.isProgramActive(programId)) revert ProgramNotActive();
@@ -579,7 +544,7 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
     /**
      * @dev Pause contract in case of emergency
      */
-    function pause() external onlyHasRole(MASTER_ADMIN_ROLE) {
+    function pause() external onlyRole(MASTER_ADMIN_ROLE) {
         _pause();
         emit ContractPaused(msg.sender);
     }
@@ -587,43 +552,36 @@ contract StudentProfile is AccessControl, Pausable, Initializable {
     /**
      * @dev Unpause contract
      */
-    function unpause() external onlyHasRole(MASTER_ADMIN_ROLE) {
+    function unpause() external onlyRole(MASTER_ADMIN_ROLE) {
         _unpause();
         emit ContractUnpaused(msg.sender);
     }
 }
 
 /*
-This contract is like a digital student management system that schools can use to:
+This contract is like a digital payment system for schools. Here's what it does in simple terms:
 
-1. Keep Track of Students:
-   - Register new students
-   - Record their attendance
-   - Monitor their academic performance
-   - Track which term/semester they're in
-   - Know which school they belong to
+1. Fee Management:
+   - Schools can set up different fees for their programs (registration, term fees, graduation fees)
+   - They can also set late payment penalties (up to 50% of the term fee)
 
-2. Manage Student Performance:
-   - Teachers can mark attendance
-   - Give points for good behavior
-   - Track academic achievements
-   - Record penalties for misconduct
-   - Keep a reputation score for each student
+2. Student Payments:
+   - Students can pay their tuition fees directly through the system
+   - The system checks if they're actually enrolled in the school
+   - If they pay late, they get charged extra fees
+   - Each payment is for a 6-month term
 
-3. Handle Administrative Tasks:
-   - Transfer students between schools
-   - Activate or deactivate student accounts
-   - Complete terms/semesters
-   - Check if students are properly enrolled
-   - View student details and history
+3. School Finance:
+   - Schools can see how much money they've collected
+   - They can withdraw their collected fees whenever they want
+   - The system keeps track of who paid what and when
 
-4. Security Features:
-   - Only authorized teachers can update records
-   - Only active schools can perform actions
-   - System can be paused in emergencies
-   - Different permission levels for different roles
+4. Safety Features:
+   - Only authorized people can access certain functions
+   - There's an emergency stop button (pause function) if something goes wrong
+   - The system verifies everything before processing payments
 
-Think of it as a digital school diary that can't be tampered with, where everything about 
-a student's academic journey is recorded securely on the blockchain. It's like having
-a permanent, transparent record book that multiple schools can trust and use.
+Think of it like a digital cashier's office for a school, but instead of going to a physical office,
+everything is handled automatically through the blockchain. It makes sure students pay the right amount,
+on time, and that schools can easily manage and collect their fees.
 */

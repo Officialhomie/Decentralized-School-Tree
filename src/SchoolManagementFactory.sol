@@ -7,6 +7,7 @@ import "node_modules/@openzeppelin/contracts/utils/Pausable.sol";
 import "node_modules/@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import "node_modules/@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+
 error InvalidImplementation();
 error InvalidRevenueSystem();
 error InvalidStudentProfile();
@@ -26,49 +27,47 @@ error InvalidRevenueShare();
 error InvalidSubscriptionFee();
 error InvalidSubscriptionDuration();
 error DirectPaymentsNotAllowed();
+error InvalidRoleRegistry();
+
+/**
+ * @title IRoleRegistry
+ * @dev Interface for role registry
+ */
+interface IRoleRegistry {
+    function grantSchoolRole(bytes32 role, address account, address school) external;
+    function grantGlobalRole(bytes32 role, address account) external;
+    function initialize(address masterAdmin) external;
+    function hasRole(bytes32 role, address account) external view returns (bool);
+    function checkRole(bytes32 role, address account, address school) external view returns (bool);
+}
 
 /**
  * @title ISchoolManagement
- * @dev Interface for school management initialization and role management
+ * @dev Interface for school management initialization
  */
 interface ISchoolManagement {
-    /**
-     * @dev Initialize the cloned SchoolManagement contract
-     * @param revenueSystem Address of the revenue system
-     * @param studentProfile Address of the student profile
-     * @param factory Address of the factory
-     * @param masterAdmin Address of the master admin
-     * @param organizationAdmin Address of the organization admin
-     */
     function initialize(
         address revenueSystem,
         address studentProfile,
-        address factory,
-        address masterAdmin,
-        address organizationAdmin
+        address tuitionSystem,
+        address roleRegistry,
+        address masterAdmin
     ) external;
-    
-    /**
-     * @dev Grant a role to an account
-     * @param role Role identifier
-     * @param account Account to grant role to
-     */
-    function grantRole(bytes32 role, address account) external;
+}
+
+/**
+ * @title IStudentProfile
+ * @dev Interface for student profile activation
+ */
+interface IStudentProfile {
+    function activateSchool(address school) external;
 }
 
 /**
  * @title IRevenueSystem
- * @dev Interface for configuring fee structures
+ * @dev Interface for custom fee structure
  */
 interface IRevenueSystem {
-    /**
-     * @dev Set custom fee structure for a school
-     * @param school Address of the school
-     * @param programFee Fee for program creation
-     * @param subscriptionFee Fee for subscription
-     * @param certificateFee Fee for certificate issuance
-     * @param revenueShare Platform's share of revenue (percentage)
-     */
     function setCustomFeeStructure(
         address school,
         uint256 programFee,
@@ -79,45 +78,24 @@ interface IRevenueSystem {
 }
 
 /**
- * @title IStudentProfile
- * @dev Interface for activating schools in the student profile system
- */
-interface IStudentProfile {
-    /**
-     * @dev Activate a school in the student profile system
-     * @param school Address of the school to activate
-     */
-    function activateSchool(address school) external;
-}
-
-/**
  * @title SchoolManagementFactory
- * @dev Factory contract for deploying and managing SchoolManagement contracts
- * 
- * This contract implements the factory pattern to create new school instances by:
- * - Using the OpenZeppelin Clones library for gas-efficient proxy deployment
- * - Managing subscriptions and configurations for schools
- * - Providing upgrade capabilities for implementation contracts
- * - Tracking deployed contracts and their statuses
+ * @dev Factory for deploying school management system contracts
  */
-contract SchoolManagementFactory is AccessControl, Pausable, Initializable, ReentrancyGuard {
+contract SchoolManagementFactory is Pausable, Initializable, ReentrancyGuard {
     using Clones for address;
 
-    // Role identifiers
+    // Role constants
     bytes32 public constant MASTER_ADMIN_ROLE = keccak256("MASTER_ADMIN_ROLE");
     bytes32 public constant SCHOOL_ROLE = keccak256("SCHOOL_ROLE");
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
     // Constants for validation
-    uint256 public constant MAX_REVENUE_SHARE = 100;
-    uint256 public constant MIN_SUBSCRIPTION_FEE = 0.01 ether;
-    uint256 public constant MAX_SUBSCRIPTION_FEE = 100 ether;
     uint256 public constant GRACE_PERIOD = 3 days;
     uint256 public constant MIN_SUBSCRIPTION_DURATION = 30 days;
     uint256 public constant MAX_SUBSCRIPTION_DURATION = 365 days;
 
     /**
-     * @dev Deployment configuration structure for schools
+     * @dev Deployment configuration structure
      */
     struct DeploymentConfig {
         uint256 programFee;
@@ -128,163 +106,144 @@ contract SchoolManagementFactory is AccessControl, Pausable, Initializable, Reen
     }
 
     /**
-     * @dev Organization information structure
+     * @dev School information structure
      */
-    struct OrganizationInfo {
+    struct SchoolInfo {
         bool isDeployed;
         bool isActive;
         uint256 subscriptionEnd;
         uint256 subscriptionDuration;
     }
 
-    // Storage
-    address public implementationContract;
-    address[] public deployedContracts;
+    // Implementation contracts
+    address public roleRegistryImpl;
+    address public schoolManagementImpl;
+    address public programManagementImpl;
+    address public studentManagementImpl;
+    address public attendanceTrackingImpl;
+    address public certificateManagementImpl;
     
-    mapping(address => OrganizationInfo) public organizationInfo;
-    mapping(address => address) public organizationToContract;
+    // Shared contracts
+    address public roleRegistry;
+    address public revenueSystem;
+    address public studentProfile;
+    address public tuitionSystem;
+    
+    // Storage
+    address[] public deployedSchools;
+    mapping(address => SchoolInfo) public schoolInfo;
+    mapping(address => address) public organizationToSchool;
     
     uint256 public totalFeesCollected;
-    
-    IRevenueSystem public revenueSystem;
-    IStudentProfile public studentProfile;
     DeploymentConfig public defaultConfig;
+    address public masterAdmin;
 
-    /**
-     * @dev Emitted when a new contract is deployed
-     * @param newContract Address of the deployed contract
-     * @param organization Address of the organization
-     * @param deploymentTime Timestamp of deployment
-     * @param subscriptionEnd Subscription end time
-     * @param subscriptionDuration Duration of subscription
-     */
-    event ContractDeployed(
-        address indexed newContract, 
+    // Events
+    event SchoolDeployed(
+        address indexed school, 
         address indexed organization,
         uint256 deploymentTime,
         uint256 subscriptionEnd,
         uint256 subscriptionDuration
     );
 
-    /**
-     * @dev Emitted when an organization is deactivated
-     * @param organization Address of the organization
-     * @param timestamp Timestamp of deactivation
-     */
-    event OrganizationDeactivated(address indexed organization, uint256 timestamp);
+    event SchoolDeactivated(address indexed school, uint256 timestamp);
     
-    /**
-     * @dev Emitted when a subscription is renewed
-     * @param organization Address of the organization
-     * @param newEndTime New subscription end time
-     * @param amountPaid Amount paid for renewal
-     */
     event SubscriptionRenewed(
-        address indexed organization, 
+        address indexed school, 
         uint256 newEndTime,
         uint256 amountPaid
     );
     
-    /**
-     * @dev Emitted when configuration is updated
-     * @param config New configuration structure
-     */
     event ConfigurationUpdated(DeploymentConfig config);
     
-    /**
-     * @dev Emitted when fees are withdrawn
-     * @param recipient Address of the recipient
-     * @param amount Amount withdrawn
-     */
     event FeesWithdrawn(address indexed recipient, uint256 amount);
     
-    /**
-     * @dev Emitted when contract is paused
-     * @param pauser Address of the pauser
-     */
     event ContractPaused(address indexed pauser);
     
-    /**
-     * @dev Emitted when contract is unpaused
-     * @param unpauser Address of the unpauser
-     */
     event ContractUnpaused(address indexed unpauser);
     
-    /**
-     * @dev Emitted when implementation is updated
-     * @param oldImplementation Address of the old implementation
-     * @param newImplementation Address of the new implementation
-     */
-    event ImplementationUpdated(address indexed oldImplementation, address indexed newImplementation);
+    event ImplementationUpdated(
+        string implementationType,
+        address indexed oldImplementation, 
+        address indexed newImplementation
+    );
     
-    /**
-     * @dev Emitted when contract is initialized
-     * @param implementation Address of the implementation
-     * @param revenueSystem Address of the revenue system
-     * @param studentProfile Address of the student profile
-     * @param masterAdmin Address of the master admin
-     * @param config Default configuration
-     */
-    event ContractInitialized(
-        address implementation,
+    event FactoryInitialized(
+        address roleRegistry,
         address revenueSystem,
         address studentProfile,
-        address masterAdmin,
-        DeploymentConfig config
+        address tuitionSystem,
+        address masterAdmin
     );
-
+    
     /**
      * @dev Constructor
-     * @param _implementation Address of the implementation contract
      */
-    constructor(address _implementation) {
-        if(_implementation == address(0)) revert InvalidImplementation();
-        implementationContract = _implementation;
-        // _disableInitializers();
+    constructor() {
+        // No setup in constructor, use initialize instead
     }
 
     /**
      * @dev Initialize the factory
-     * @param _implementation Address of the implementation contract
-     * @param _revenueSystem Address of the revenue system
-     * @param _studentProfile Address of the student profile
-     * @param _masterAdmin Address of the master admin
-     * @param _defaultConfig Default configuration structure
      */
     function initialize(
-        address _implementation,
+        address _roleRegistryImpl,
+        address _schoolManagementImpl,
+        address _programManagementImpl,
+        address _studentManagementImpl,
+        address _attendanceTrackingImpl,
+        address _certificateManagementImpl,
         address _revenueSystem,
         address _studentProfile,
+        address _tuitionSystem,
         address _masterAdmin,
         DeploymentConfig memory _defaultConfig
     ) public initializer {
-        if(_implementation == address(0)) revert InvalidImplementation();
+        if(_roleRegistryImpl == address(0)) revert InvalidImplementation();
+        if(_schoolManagementImpl == address(0)) revert InvalidImplementation();
         if(_revenueSystem == address(0)) revert InvalidRevenueSystem();
         if(_studentProfile == address(0)) revert InvalidStudentProfile();
         if(_masterAdmin == address(0)) revert InvalidMasterAdmin();
         
-        _validateConfig(_defaultConfig);
+        // Store implementation addresses
+        roleRegistryImpl = _roleRegistryImpl;
+        schoolManagementImpl = _schoolManagementImpl;
+        programManagementImpl = _programManagementImpl;
+        studentManagementImpl = _studentManagementImpl;
+        attendanceTrackingImpl = _attendanceTrackingImpl;
+        certificateManagementImpl = _certificateManagementImpl;
         
-        implementationContract = _implementation;
-        revenueSystem = IRevenueSystem(_revenueSystem);
-        studentProfile = IStudentProfile(_studentProfile);
+        // Store shared contracts
+        revenueSystem = _revenueSystem;
+        studentProfile = _studentProfile;
+        tuitionSystem = _tuitionSystem;
+        masterAdmin = _masterAdmin;
         defaultConfig = _defaultConfig;
-
-        _grantRole(MASTER_ADMIN_ROLE, _masterAdmin);
-        _grantRole(DEFAULT_ADMIN_ROLE, _masterAdmin);
-
-        emit ContractInitialized(
-            _implementation,
+        
+        // Deploy role registry
+        roleRegistry = _roleRegistryImpl.clone();
+        IRoleRegistry(roleRegistry).initialize(_masterAdmin);
+        
+        emit FactoryInitialized(
+            roleRegistry,
             _revenueSystem,
             _studentProfile,
-            _masterAdmin,
-            _defaultConfig
+            _tuitionSystem,
+            _masterAdmin
         );
     }
 
     /**
+     * @dev Only the master admin can call this function
+     */
+    modifier onlyMasterAdmin() {
+        require(msg.sender == masterAdmin, "Only master admin");
+        _;
+    }
+
+    /**
      * @dev Modifier to validate organization address
-     * @param organization Address of the organization
      */
     modifier onlyValidOrganization(address organization) {
         if(organization == address(0)) revert InvalidOrganizationAddress();
@@ -293,57 +252,84 @@ contract SchoolManagementFactory is AccessControl, Pausable, Initializable, Reen
     }
 
     /**
-     * @dev Modifier to validate active organization
-     * @param organization Address of the organization
+     * @dev Deploy a new school management system
      */
-    modifier onlyActiveOrganization(address organization) {
-        if(!organizationInfo[organization].isActive) revert OrganizationNotActive();
-        if(block.timestamp > organizationInfo[organization].subscriptionEnd + GRACE_PERIOD)
-            revert SubscriptionExpiredBeyondGracePeriod();
-        _;
-    }
-
-    /**
-     * @dev Deploy a new SchoolManagement contract
-     * @param organizationAdmin Address of the organization admin
-     * @param customConfig Custom configuration for the school
-     * @return address Address of the deployed contract
-     * Requirements:
-     * - Must be called by master admin
-     * - Organization must be valid
-     * - Contract must not be paused
-     * - Organization must not already have a contract
-     * - Payment must cover subscription fee
-     */
-    function deploySchoolManagement(
+    function deploySchool(
         address organizationAdmin,
         DeploymentConfig memory customConfig
-    ) external payable onlyRole(MASTER_ADMIN_ROLE) 
+    ) external payable onlyMasterAdmin 
       onlyValidOrganization(organizationAdmin) 
       whenNotPaused 
       nonReentrant 
-      returns (address) {
-        if(organizationInfo[organizationAdmin].isDeployed) revert OrganizationAlreadyHasContract();
+      returns (address schoolContract, address programContract, address studentContract, address attendanceContract, address certificateContract) {
+        if(schoolInfo[organizationAdmin].isDeployed) revert OrganizationAlreadyHasContract();
         if(msg.value < defaultConfig.subscriptionFee) revert InsufficientSubscriptionFee();
         
         _validateConfig(customConfig);
 
-        address newContract = implementationContract.clone();
+        // Clone all contracts
+        schoolContract = schoolManagementImpl.clone();
+        programContract = programManagementImpl.clone();
+        studentContract = studentManagementImpl.clone();
+        attendanceContract = attendanceTrackingImpl.clone();
+        certificateContract = certificateManagementImpl.clone();
         
-        ISchoolManagement(newContract).initialize(
-            address(revenueSystem),
-            address(studentProfile),
-            address(this),
-            msg.sender,
-            organizationAdmin
+        // Initialize all contracts
+        // 1. School Management
+        ISchoolManagement(schoolContract).initialize(
+            revenueSystem,
+            studentProfile,
+            tuitionSystem,
+            roleRegistry,
+            masterAdmin
+        );
+        
+        // 2. Program Management
+        ISchoolManagement(programContract).initialize(
+            revenueSystem,
+            studentProfile,
+            tuitionSystem,
+            roleRegistry,
+            masterAdmin
+        );
+        
+        // 3. Student Management
+        ISchoolManagement(studentContract).initialize(
+            revenueSystem,
+            studentProfile,
+            tuitionSystem,
+            roleRegistry,
+            masterAdmin
+        );
+        
+        // 4. Attendance Tracking
+        ISchoolManagement(attendanceContract).initialize(
+            revenueSystem,
+            studentProfile,
+            tuitionSystem,
+            roleRegistry,
+            masterAdmin
+        );
+        
+        // 5. Certificate Management
+        ISchoolManagement(certificateContract).initialize(
+            revenueSystem,
+            studentProfile,
+            tuitionSystem,
+            roleRegistry,
+            masterAdmin
         );
 
-        ISchoolManagement(newContract).grantRole(SCHOOL_ROLE, newContract);
-        ISchoolManagement(newContract).grantRole(ADMIN_ROLE, organizationAdmin);
-
+        // Assign roles
+        // School role for the main contract
+        IRoleRegistry(roleRegistry).grantSchoolRole(SCHOOL_ROLE, schoolContract, schoolContract);
+        // Admin role for the organization admin
+        IRoleRegistry(roleRegistry).grantSchoolRole(ADMIN_ROLE, organizationAdmin, schoolContract);
+        
+        // Set custom fee structure if provided
         if (customConfig.subscriptionFee > 0) {
-            revenueSystem.setCustomFeeStructure(
-                newContract,
+            IRevenueSystem(revenueSystem).setCustomFeeStructure(
+                schoolContract,
                 customConfig.programFee,
                 customConfig.subscriptionFee,
                 customConfig.certificateFee,
@@ -351,70 +337,101 @@ contract SchoolManagementFactory is AccessControl, Pausable, Initializable, Reen
             );
         }
 
-        studentProfile.activateSchool(newContract);
+        // Activate school in the student profile
+        IStudentProfile(studentProfile).activateSchool(schoolContract);
 
-        deployedContracts.push(newContract);
+        // Record deployment
+        deployedSchools.push(schoolContract);
         
-        organizationInfo[organizationAdmin] = OrganizationInfo({
+        schoolInfo[organizationAdmin] = SchoolInfo({
             isDeployed: true,
             isActive: true,
             subscriptionEnd: block.timestamp + customConfig.subscriptionDuration,
             subscriptionDuration: customConfig.subscriptionDuration
         });
         
-        organizationToContract[organizationAdmin] = newContract;
+        organizationToSchool[organizationAdmin] = schoolContract;
         totalFeesCollected += msg.value;
 
-        emit ContractDeployed(
-            newContract, 
+        emit SchoolDeployed(
+            schoolContract, 
             organizationAdmin, 
             block.timestamp,
-            organizationInfo[organizationAdmin].subscriptionEnd,
+            schoolInfo[organizationAdmin].subscriptionEnd,
             customConfig.subscriptionDuration
         );
 
-        return newContract;
+        return (schoolContract, programContract, studentContract, attendanceContract, certificateContract);
     }
 
     /**
-     * @dev Renew subscription for an organization
-     * @param organization Address of the organization
-     * Requirements:
-     * - Organization must be active
-     * - Payment must cover subscription fee
+     * @dev Update implementation address
      */
-    function renewSubscription(address organization) 
-        external 
-        payable 
-        onlyActiveOrganization(organization) 
-        nonReentrant 
-    {
-        OrganizationInfo storage info = organizationInfo[organization];
-        if(msg.value < defaultConfig.subscriptionFee) revert InsufficientSubscriptionFee();
+    function updateImplementation(
+        string memory implementationType,
+        address newImplementation
+    ) external onlyMasterAdmin {
+        if(newImplementation == address(0)) revert InvalidImplementation();
+        if(!_isContract(newImplementation)) revert NotContractAddress();
         
-        uint256 newEndTime = block.timestamp + info.subscriptionDuration;
-        if (block.timestamp <= info.subscriptionEnd) {
-            newEndTime = info.subscriptionEnd + info.subscriptionDuration;
+        address oldImplementation;
+        
+        if (keccak256(bytes(implementationType)) == keccak256(bytes("roleRegistry"))) {
+            oldImplementation = roleRegistryImpl;
+            roleRegistryImpl = newImplementation;
+        } else if (keccak256(bytes(implementationType)) == keccak256(bytes("schoolManagement"))) {
+            oldImplementation = schoolManagementImpl;
+            schoolManagementImpl = newImplementation;
+        } else if (keccak256(bytes(implementationType)) == keccak256(bytes("programManagement"))) {
+            oldImplementation = programManagementImpl;
+            programManagementImpl = newImplementation;
+        } else if (keccak256(bytes(implementationType)) == keccak256(bytes("studentManagement"))) {
+            oldImplementation = studentManagementImpl;
+            studentManagementImpl = newImplementation;
+        } else if (keccak256(bytes(implementationType)) == keccak256(bytes("attendanceTracking"))) {
+            oldImplementation = attendanceTrackingImpl;
+            attendanceTrackingImpl = newImplementation;
+        } else if (keccak256(bytes(implementationType)) == keccak256(bytes("certificateManagement"))) {
+            oldImplementation = certificateManagementImpl;
+            certificateManagementImpl = newImplementation;
+        } else {
+            revert("Invalid implementation type");
         }
         
-        info.subscriptionEnd = newEndTime;
-        totalFeesCollected += msg.value;
+        if(newImplementation == oldImplementation) revert SameImplementation();
         
-        emit SubscriptionRenewed(organization, newEndTime, msg.value);
+        emit ImplementationUpdated(implementationType, oldImplementation, newImplementation);
+    }
+
+    /**
+     * @dev Update shared contract address
+     */
+    function updateSharedContract(
+        string memory contractType,
+        address newAddress
+    ) external onlyMasterAdmin {
+        require(newAddress != address(0), "Invalid address");
+        
+        if (keccak256(bytes(contractType)) == keccak256(bytes("roleRegistry"))) {
+            if(!_isContract(newAddress)) revert InvalidRoleRegistry();
+            roleRegistry = newAddress;
+        } else if (keccak256(bytes(contractType)) == keccak256(bytes("revenueSystem"))) {
+            revenueSystem = newAddress;
+        } else if (keccak256(bytes(contractType)) == keccak256(bytes("studentProfile"))) {
+            studentProfile = newAddress;
+        } else if (keccak256(bytes(contractType)) == keccak256(bytes("tuitionSystem"))) {
+            tuitionSystem = newAddress;
+        } else {
+            revert("Invalid contract type");
+        }
     }
 
     /**
      * @dev Withdraw collected fees
-     * @param recipient Address to send fees to
-     * @param amount Amount to withdraw
-     * Requirements:
-     * - Must be called by master admin
-     * - Recipient must be valid
-     * - Amount must not exceed collected fees
      */
     function withdrawFees(address payable recipient, uint256 amount) 
         external 
-        onlyRole(MASTER_ADMIN_ROLE) 
+        onlyMasterAdmin 
         nonReentrant 
     {
         if(recipient == address(0)) revert InvalidRecipient();
@@ -428,163 +445,61 @@ contract SchoolManagementFactory is AccessControl, Pausable, Initializable, Reen
     }
 
     /**
-     * @dev Update implementation contract address
-     * @param newImplementation Address of the new implementation
-     * Requirements:
-     * - Must be called by master admin
-     * - New implementation must be valid
-     * - New implementation must be different from current
-     * - New implementation must be a contract
+     * @dev Renew subscription for a school
      */
-    function updateImplementation(address newImplementation) 
+    function renewSubscription(address organization) 
         external 
-        onlyRole(MASTER_ADMIN_ROLE) 
+        payable 
+        nonReentrant 
     {
-        if(newImplementation == address(0)) revert InvalidImplementation();
-        if(newImplementation == implementationContract) revert SameImplementation();
-        if(!_isContract(newImplementation)) revert NotContractAddress();
+        if(!schoolInfo[organization].isDeployed) revert InvalidOrganizationAddress();
+        if(msg.value < defaultConfig.subscriptionFee) revert InsufficientSubscriptionFee();
         
-        address oldImplementation = implementationContract;
-        implementationContract = newImplementation;
+        SchoolInfo storage info = schoolInfo[organization];
         
-        emit ImplementationUpdated(oldImplementation, newImplementation);
-    }
-
-    /**
-     * @dev Deactivate an organization
-     * @param organization Address of the organization
-     * Requirements:
-     * - Must be called by master admin
-     * - Organization must be active
-     */
-    function deactivateOrganization(address organization) 
-        external 
-        onlyRole(MASTER_ADMIN_ROLE) 
-    {
-        if(!organizationInfo[organization].isActive) revert OrganizationNotActive();
-        organizationInfo[organization].isActive = false;
-        emit OrganizationDeactivated(organization, block.timestamp);
-    }
-
-    /**
-     * @dev Update default configuration
-     * @param newConfig New configuration structure
-     * Requirements:
-     * - Must be called by master admin
-     * - Configuration must be valid
-     */
-    function updateDefaultConfig(DeploymentConfig memory newConfig) 
-        external 
-        onlyRole(MASTER_ADMIN_ROLE) 
-    {
-        _validateConfig(newConfig);
-        defaultConfig = newConfig;
-        emit ConfigurationUpdated(newConfig);
-    }
-
-    /**
-     * @dev Get a batch of deployed contracts
-     * @param offset Starting index
-     * @param limit Maximum number of contracts to return
-     * @return address[] Array of contract addresses
-     */
-    function getDeployedContracts(uint256 offset, uint256 limit) 
-        external 
-        view 
-        returns (address[] memory) 
-    {
-        uint256 end = offset + limit;
-        if (end > deployedContracts.length) {
-            end = deployedContracts.length;
+        // If subscription ended beyond grace period, revert
+        if(info.subscriptionEnd + GRACE_PERIOD < block.timestamp && info.isActive) {
+            revert SubscriptionExpiredBeyondGracePeriod();
         }
         
-        address[] memory batch = new address[](end - offset);
-        for (uint256 i = offset; i < end; i++) {
-            batch[i - offset] = deployedContracts[i];
+        // Set new subscription end date
+        // If still active, add duration to current end date
+        // If expired but within grace, add duration to current timestamp
+        uint256 newEndTime;
+        if(info.subscriptionEnd >= block.timestamp) {
+            newEndTime = info.subscriptionEnd + info.subscriptionDuration;
+        } else {
+            newEndTime = block.timestamp + info.subscriptionDuration;
         }
         
-        return batch;
-    }
-
-    /**
-     * @dev Get details about an organization
-     * @param organization Address of the organization
-     * @return contractAddress Address of the organization's contract
-     * @return isActive Whether the organization is active
-     * @return subscriptionEnd Timestamp when subscription ends
-     * @return subscriptionDuration Duration of the subscription
-     * @return isInGracePeriod Whether the organization is in grace period
-     */
-    function getOrganizationDetails(address organization) 
-        external 
-        view 
-        returns (
-            address contractAddress,
-            bool isActive,
-            uint256 subscriptionEnd,
-            uint256 subscriptionDuration,
-            bool isInGracePeriod
-        ) 
-    {
-        OrganizationInfo memory info = organizationInfo[organization];
-        return (
-            organizationToContract[organization],
-            info.isActive,
-            info.subscriptionEnd,
-            info.subscriptionDuration,
-            block.timestamp > info.subscriptionEnd && 
-            block.timestamp <= info.subscriptionEnd + GRACE_PERIOD
+        info.subscriptionEnd = newEndTime;
+        info.isActive = true;
+        totalFeesCollected += msg.value;
+        
+        emit SubscriptionRenewed(
+            organizationToSchool[organization],
+            newEndTime,
+            msg.value
         );
     }
 
     /**
-     * @dev Get default configuration
-     * @return DeploymentConfig Default configuration structure
+     * @dev Deactivate an organization's school
      */
-    function getDefaultConfig() external view returns (DeploymentConfig memory) {
-        return defaultConfig;
-    }
-
-    /**
-     * @dev Pause contract in case of emergency
-     * Requirements:
-     * - Must be called by master admin
-     */
-    function pause() external onlyRole(MASTER_ADMIN_ROLE) {
-        _pause();
-        emit ContractPaused(msg.sender);
-    }
-
-    /**
-     * @dev Unpause contract
-     * Requirements:
-     * - Must be called by master admin
-     */
-    function unpause() external onlyRole(MASTER_ADMIN_ROLE) {
-        _unpause();
-        emit ContractUnpaused(msg.sender);
-    }
-
-    /**
-     * @dev Validate configuration parameters
-     * @param config Configuration structure to validate
-     * Requirements:
-     * - Revenue share must not exceed maximum
-     * - Subscription fee must be within range
-     * - Subscription duration must be within range
-     */
-    function _validateConfig(DeploymentConfig memory config) internal pure {
-        if(config.revenueShare > MAX_REVENUE_SHARE) revert InvalidRevenueShare();
-        if(config.subscriptionFee < MIN_SUBSCRIPTION_FEE || 
-           config.subscriptionFee > MAX_SUBSCRIPTION_FEE) revert InvalidSubscriptionFee();
-        if(config.subscriptionDuration < MIN_SUBSCRIPTION_DURATION || 
-           config.subscriptionDuration > MAX_SUBSCRIPTION_DURATION) revert InvalidSubscriptionDuration();
+    function deactivateOrganization(address organization)
+        external
+        onlyMasterAdmin
+    {
+        if(!schoolInfo[organization].isDeployed) revert InvalidOrganizationAddress();
+        
+        SchoolInfo storage info = schoolInfo[organization];
+        info.isActive = false;
+        
+        emit SchoolDeactivated(organizationToSchool[organization], block.timestamp);
     }
 
     /**
      * @dev Check if an address is a contract
-     * @param account Address to check
-     * @return bool True if address is a contract
      */
     function _isContract(address account) internal view returns (bool) {
         uint256 size;
@@ -593,9 +508,53 @@ contract SchoolManagementFactory is AccessControl, Pausable, Initializable, Reen
     }
 
     /**
-     * @dev Handle direct payments
-     * Requirements:
-     * - Direct payments are not allowed
+     * @dev Update default configuration parameters
+     */
+    function updateDefaultConfig(DeploymentConfig memory newConfig) 
+        external 
+        onlyMasterAdmin 
+    {
+        _validateConfig(newConfig);
+        defaultConfig = newConfig;
+        
+        emit ConfigurationUpdated(newConfig);
+    }
+    
+    /**
+     * @dev Get the current default configuration
+     */
+    function getDefaultConfig() external view returns (DeploymentConfig memory) {
+        return defaultConfig;
+    }
+
+    /**
+     * @dev Validate configuration parameters
+     */
+    function _validateConfig(DeploymentConfig memory config) internal pure {
+        if(config.revenueShare > 100) revert InvalidRevenueShare();
+        if(config.subscriptionFee == 0) revert InvalidSubscriptionFee();
+        if(config.subscriptionDuration < MIN_SUBSCRIPTION_DURATION || 
+           config.subscriptionDuration > MAX_SUBSCRIPTION_DURATION) revert InvalidSubscriptionDuration();
+    }
+
+    /**
+     * @dev Pause the factory
+     */
+    function pause() external onlyMasterAdmin {
+        _pause();
+        emit ContractPaused(msg.sender);
+    }
+
+    /**
+     * @dev Unpause the factory
+     */
+    function unpause() external onlyMasterAdmin {
+        _unpause();
+        emit ContractUnpaused(msg.sender);
+    }
+
+    /**
+     * @dev Reject direct payments
      */
     receive() external payable {
         revert DirectPaymentsNotAllowed();

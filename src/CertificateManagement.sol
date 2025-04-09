@@ -4,9 +4,33 @@ pragma solidity ^0.8.20;
 import "node_modules/@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "node_modules/@thirdweb-dev/contracts/node_modules/@openzeppelin/contracts/utils/Counters.sol";
 import "./SchoolManagementBase.sol";
-import "interfaces/IProgramManagement.sol";
-import "interfaces/IAttendanceTracking.sol";
-import "interfaces/ICertificateManagement.sol";
+
+
+/**
+ * @title IProgramManagement
+ * @dev Interface for program management functionality
+ */
+interface IProgramManagement {
+    function isProgramActive(uint256 programId) external view returns (bool);
+    function getProgramDetails(uint256 programId) external view returns (string memory name, uint256 termFee);
+}
+
+/**
+ * @title IAttendanceTracking
+ * @dev Interface for attendance tracking
+ */
+interface IAttendanceTracking {
+    function hasMetAttendanceRequirement(address student, uint256 programId) external view returns (bool);
+}
+
+/**
+ * @title ICertificateManagement
+ * @dev Interface for certificate management
+ */
+interface ICertificateManagement {
+    function mintCertificate(address student, uint256 batchId) external payable;
+    function getCurrentCertificateTokenId() external view returns (uint256);
+}
 
 /**
  * @title CertificateManagement
@@ -37,6 +61,30 @@ contract CertificateManagement is ERC721, SchoolManagementBase, ICertificateMana
      */
     constructor() ERC721("SchoolCertificate", "CERT") {
         // Initialize ERC721 with token name and symbol
+    }
+    
+    /**
+     * @dev Initialize the certificate management contract
+     * @param _revenueSystem Address of the revenue system
+     * @param _studentProfile Address of the student profile
+     * @param _tuitionSystem Address of the tuition system
+     * @param _roleRegistry Address of the role registry
+     * @param _masterAdmin Address of the master admin
+     */
+    function initialize(
+        address _revenueSystem,
+        address _studentProfile,
+        address _tuitionSystem,
+        address _roleRegistry,
+        address _masterAdmin
+    ) public override initializer {
+        SchoolManagementBase.initialize(
+            _revenueSystem,
+            _studentProfile,
+            _tuitionSystem,
+            _roleRegistry,
+            _masterAdmin
+        );
     }
     
     /**
@@ -104,12 +152,12 @@ contract CertificateManagement is ERC721, SchoolManagementBase, ICertificateMana
     }
     
     /**
-     * @dev Required override to support ERC721 and AccessControl interfaces
+     * @dev Overrides supportsInterface for ERC721 compatibility
      */
     function supportsInterface(bytes4 interfaceId) 
         public 
         view 
-        override(ERC721, AccessControl) 
+        override(ERC721) 
         returns (bool) 
     {
         return super.supportsInterface(interfaceId);

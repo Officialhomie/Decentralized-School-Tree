@@ -17,7 +17,7 @@ error SubscriptionExpired();
 
 contract MockRevenueSystem {
     uint256 public programCreationFee = 0.1 ether;
-    uint256 public certificateFee = 0.05 ether;
+    uint256 public testCertificateFee = 0.05 ether;
 
     function processTuitionPayment(address student, uint256 amount) external payable {}
     
@@ -25,7 +25,7 @@ contract MockRevenueSystem {
         address school,
         uint256 programFee,
         uint256 subscriptionFee,
-        uint256 certificateFee,
+        uint256 certificateFeeParam,
         uint256 revenueShare
     ) external {}
 }
@@ -55,21 +55,64 @@ contract MockTuitionSystem {
     function recordTuitionPayment(address student, uint256 term) external {}
 }
 
+contract MockRoleRegistry {
+    // Role storage
+    mapping(bytes32 => mapping(address => bool)) public globalRoles;
+    mapping(address => mapping(bytes32 => mapping(address => bool))) public schoolRoles;
+    
+    // Events
+    event SchoolRoleGranted(bytes32 indexed role, address indexed account, address indexed school);
+    event SchoolRoleRevoked(bytes32 indexed role, address indexed account, address indexed school);
+    
+    function initialize(address masterAdmin) public {
+        bytes32 masterAdminRole = keccak256("MASTER_ADMIN_ROLE");
+        bytes32 defaultAdminRole = 0x00;
+        globalRoles[masterAdminRole][masterAdmin] = true;
+        globalRoles[defaultAdminRole][masterAdmin] = true;
+    }
+    
+    function checkRole(bytes32 role, address account, address school) public view returns (bool) {
+        return globalRoles[role][account] || schoolRoles[school][role][account];
+    }
+    
+    function grantSchoolRole(bytes32 role, address account, address school) external {
+        schoolRoles[school][role][account] = true;
+        emit SchoolRoleGranted(role, account, school);
+    }
+    
+    function revokeSchoolRole(bytes32 role, address account, address school) external {
+        schoolRoles[school][role][account] = false;
+        emit SchoolRoleRevoked(role, account, school);
+    }
+    
+    function grantGlobalRole(bytes32 role, address account) external {
+        globalRoles[role][account] = true;
+    }
+    
+    function hasRole(bytes32 role, address account) external view returns (bool) {
+        return globalRoles[role][account];
+    }
+    
+    function hasSchoolRole(bytes32 role, address account, address school) external view returns (bool) {
+        return schoolRoles[school][role][account];
+    }
+}
+
 // We need to use a real SchoolManagementBase to test ProgramManagement
 contract TestableSchoolManagementBase is SchoolManagementBase {
     function setupForTest(
         address _revenueSystem,
         address _studentProfile,
         address _tuitionSystem,
-        address _masterAdmin,
-        address _organizationAdmin
+        address _roleRegistry,
+        address _masterAdmin
     ) external {
         initialize(
             _revenueSystem,
             _studentProfile,
             _tuitionSystem,
-            _masterAdmin,
-            _organizationAdmin
+            _roleRegistry,
+            _masterAdmin
         );
     }
 }
@@ -79,6 +122,7 @@ contract ProgramManagementTest is Test {
     MockRevenueSystem revenueSystem;
     MockStudentProfile studentProfile;
     MockTuitionSystem tuitionSystem;
+    MockRoleRegistry roleRegistry;
     
     address masterAdmin;
     address organizationAdmin;
@@ -115,6 +159,14 @@ contract ProgramManagementTest is Test {
         revenueSystem = new MockRevenueSystem();
         studentProfile = new MockStudentProfile();
         tuitionSystem = new MockTuitionSystem();
+        roleRegistry = new MockRoleRegistry();
+        roleRegistry.initialize(masterAdmin);
+        
+        // Grant admin role to organizationAdmin
+        roleRegistry.grantGlobalRole(ADMIN_ROLE, organizationAdmin);
+        
+        // Grant teacher role to teacher
+        roleRegistry.grantGlobalRole(TEACHER_ROLE, teacher);
         
         // Deploy implementation
         ProgramManagement implementation = new ProgramManagement();
@@ -127,23 +179,20 @@ contract ProgramManagementTest is Test {
                 address(revenueSystem),
                 address(studentProfile),
                 address(tuitionSystem),
-                masterAdmin,
-                organizationAdmin
+                address(roleRegistry),
+                masterAdmin
             )
         );
         
         // Get the proxied ProgramManagement
         programManagement = ProgramManagement(payable(address(proxy)));
-        
-        // Setup roles
-        vm.startPrank(organizationAdmin);
-        programManagement.grantRole(TEACHER_ROLE, teacher);
-        programManagement.grantRole(SCHOOL_ROLE, address(programManagement));
-        vm.stopPrank();
-        
+                
         // Set the subscription to active for tests
         vm.prank(organizationAdmin);
         programManagement.renewSubscription{value: 0.1 ether}();
+        
+        // Grant SCHOOL_ROLE to programManagement for tests that need it
+        roleRegistry.grantGlobalRole(SCHOOL_ROLE, address(programManagement));
     }
     
     function test_CreateProgram() public {
@@ -237,16 +286,8 @@ contract ProgramManagementTest is Test {
         
         vm.startPrank(unauthorized);
         
-        // Since we've funded the account, the failure should now be due to access control
-        // Let's use AccessControlUnauthorizedAccount error from OpenZeppelin
-        bytes32 role = keccak256("ADMIN_ROLE");
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                bytes4(keccak256("AccessControlUnauthorizedAccount(address,bytes32)")),
-                unauthorized,
-                role
-            )
-        );
+        // The error message from our onlyRole modifier is "Missing required role"
+        vm.expectRevert("Missing required role");
         
         programManagement.createProgram{value: 0.1 ether}(
             "Computer Science",
@@ -542,23 +583,19 @@ contract ProgramManagementTest is Test {
             maxEnrollment
         );
         
-        // Wait to ensure we're not rate limited for the first update
-        vm.warp(block.timestamp + 1 hours + 1);
-        
-        // Update fee 
+        // Try to update fee without waiting (should be rate limited)
+        vm.expectRevert(OperationTooFrequent.selector);
         programManagement.updateProgramFee(1, termFee * 2);
         
-        // Try to update fee again immediately (should be rate limited)
-        vm.expectRevert(OperationTooFrequent.selector);
-        programManagement.updateProgramFee(1, termFee * 3);
+        // Wait for the cooldown period (1 hour plus a little extra for safety)
+        vm.warp(block.timestamp + 3601);
         
-        // Wait for cooldown and try again
-        vm.warp(block.timestamp + 1 hours + 1);
-        programManagement.updateProgramFee(1, termFee * 3);
+        // Now the update should work
+        programManagement.updateProgramFee(1, termFee * 2);
         
         // Verify fee was updated
         (, uint256 retrievedFee) = programManagement.getProgramDetails(1);
-        assertEq(retrievedFee, termFee * 3);
+        assertEq(retrievedFee, termFee * 2);
         
         vm.stopPrank();
     }
